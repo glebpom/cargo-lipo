@@ -34,7 +34,8 @@ fn real_main() -> Result<()> {
     let release = matches.is_present("release");
     let verbose = matches.is_present("verbose");
 
-    let lib_name = try!(find_lib_name(verbose));
+    let maybe_package = matches.value_of("package");
+    let lib_name = try!(find_lib_name(verbose, maybe_package));
 
     let triples: Vec<&str> = match matches.values_of("targets") {
         Some(values) => values.collect(),
@@ -44,7 +45,7 @@ fn real_main() -> Result<()> {
     let features = matches.value_of("features").unwrap_or("");
 
     for triple in &triples {
-        try!(build_triple(triple, release, verbose, features));
+        try!(build_triple(triple, release, verbose, features, maybe_package));
     }
 
     let target_path = try!(find_target_path(verbose));
@@ -57,6 +58,7 @@ fn real_main() -> Result<()> {
 
     let mut cmd = Command::new("lipo");
     cmd.args(&["-create", "-output"]);
+
     cmd.arg(out.as_os_str());
 
     for triple in &triples {
@@ -81,6 +83,7 @@ fn build_app<'a, 'b>() -> App<'a, 'b> {
             .author("Tim Neumann <mail@timnn.me>")
             .about("Automatically create universal libraries")
             .args_from_usage("--release 'Compiles in release mode'
+                              -p --package=[SPEC] 'Package to build'
                               --targets=[TRIPLE1,TRIPLE2] 'Build for the target triples'
                               --features=[FEATURES] 'Space-separated list of features to also build'
                               -v --verbose 'Print additional information'")
@@ -88,13 +91,15 @@ fn build_app<'a, 'b>() -> App<'a, 'b> {
 }
 
 /// Invoke `cargo build` for the given triple.
-fn build_triple(triple: &str, release: bool, verbose: bool, features: &str) -> Result<()> {
+fn build_triple(triple: &str, release: bool, verbose: bool, features: &str, maybe_package: Option<&str>) -> Result<()> {
     let mut cmd = Command::new("cargo");
     cmd.args(&["build", "--target", triple, "--lib", "--features", features]);
 
     if release { cmd.arg("--release"); }
     if verbose { cmd.arg("--verbose"); }
-
+    if let Some(package) = maybe_package {
+        cmd.args(&["-p", package]);
+    }
     log_command(&cmd, verbose);
 
     let status = trm!("Failed to build library for {}", triple; cmd.status());
@@ -104,10 +109,17 @@ fn build_triple(triple: &str, release: bool, verbose: bool, features: &str) -> R
 }
 
 /// Find the name of the staticlibrary to build as defined in the project's `Cargo.toml`.
-fn find_lib_name(verbose: bool) -> Result<String> {
+fn find_lib_name(verbose: bool, maybe_package: Option<&str>) -> Result<String> {
     static ERR: &'static str = "Failed to parse `cargo read-manifest` output";
 
-    let value = trm!(ERR; cargo_json_value("read-manifest", verbose));
+    let mut subcommand = vec!["read-manifest".to_string()];
+
+    if let Some(package) = maybe_package {
+        subcommand.push("--manifest-path".to_string());
+        subcommand.push(format!("./{}/Cargo.toml", package));
+    };
+
+    let value = trm!(ERR; cargo_json_value(&subcommand, verbose));
 
     let targets = trm!(ERR; json_get!(Array, value.targets));
 
@@ -140,7 +152,7 @@ fn find_target_path(verbose: bool) -> Result<PathBuf> {
     static ERR: &'static str = "Failed to parse `cargo locate-project`";
     static ERR2: &'static str = "Failed to verify target directory";
 
-    let value = trm!(ERR; cargo_json_value("locate-project", verbose));
+    let value = trm!(ERR; cargo_json_value(&vec!["locate-project".to_string()], verbose));
 
     let toml_str = trm!(ERR; json_get!(String, value.root));
     let toml: &Path = toml_str.as_ref();
@@ -158,9 +170,9 @@ fn find_target_path(verbose: bool) -> Result<PathBuf> {
 }
 
 /// Create a `serde_json::Value` from the output of the given cargo subcomand.
-fn cargo_json_value(subcommand: &str, verbose: bool) -> Result<json::Value> {
+fn cargo_json_value(subcommand: &[String], verbose: bool) -> Result<json::Value> {
     let mut cmd = Command::new("cargo");
-    cmd.arg(subcommand);
+    cmd.args(subcommand);
 
     log_command(&cmd, verbose);
 
